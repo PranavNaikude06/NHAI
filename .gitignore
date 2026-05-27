@@ -1,0 +1,13 @@
+# Ignore sensitive files and directories
+__MACOSX/
+.DS_Store
+node_modules/
+models_tmp/
+.env
+.env.*
+
+# Ignore PRD and doc files
+*prd.md
+*PRD*.md
+*prd*.md
+personc.md
