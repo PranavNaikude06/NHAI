@@ -6,6 +6,13 @@ NativeModules.TFLiteInference = {
   ping: jest.fn(async () => 'bridge_ok'),
   runBlazeFace: jest.fn(async () => []),
   runFaceNet: jest.fn(async () => []),
+  runFullPipeline: jest.fn(async () => ({
+    faceDetected: false,
+    identity: null,
+    confidence: 0,
+    landmarks: [],
+    box: [],
+  })),
 };
 
 NativeModules.MediaPipeLandmark = {

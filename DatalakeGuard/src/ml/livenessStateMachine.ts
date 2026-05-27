@@ -322,3 +322,92 @@ export function updateLivenessState(
     }
   };
 }
+
+export interface PassiveLivenessResult {
+  passed: boolean;
+  rigidityScore: number;
+  blinkCount: number;
+  framesAnalyzed: number;
+  reason?: 'photo_detected' | 'no_blink' | 'insufficient_frames';
+}
+
+export function evaluatePassiveLiveness(
+  landmarks: Landmark[],
+  context: LivenessContext
+): { context: LivenessContext; result: PassiveLivenessResult } {
+  if (!landmarks || landmarks.length === 0) {
+    return {
+      context,
+      result: {
+        passed: false,
+        rigidityScore: 1.0,
+        blinkCount: 0,
+        framesAnalyzed: 0,
+        reason: 'insufficient_frames'
+      }
+    };
+  }
+
+  // Update EAR history and landmark buffer
+  const ear = calculateEAR(landmarks);
+  const earHistory = [...(context.earHistory || []), ear].slice(-50);
+  
+  const landmarkBuffer = [...(context.landmarkBuffer || []), landmarks].slice(-MIN_FRAMES_FOR_RIGIDITY);
+  
+  let rigidityScore = context.rigidityScore !== undefined ? context.rigidityScore : 1.0;
+  let rigidityChecked = context.rigidityChecked || false;
+  
+  if (landmarkBuffer.length >= MIN_FRAMES_FOR_RIGIDITY) {
+    rigidityScore = computeRigidityScore(landmarkBuffer);
+    rigidityChecked = true;
+  }
+  
+  // Monitor EAR for blink in the earHistory
+  let hasDipped = false;
+  let blinkCount = 0;
+  for (const val of earHistory) {
+    if (!hasDipped && val < EAR_BLINK_THRESHOLD) {
+      hasDipped = true;
+    } else if (hasDipped && val > EAR_OPEN_THRESHOLD) {
+      blinkCount++;
+      hasDipped = false;
+    }
+  }
+
+  const rigidityPassed = context.disableRigidityCheck === true || rigidityScore >= RIGIDITY_SCORE_THRESHOLD;
+  const blinkPassed = blinkCount >= 1;
+  
+  let passed = false;
+  let reason: 'photo_detected' | 'no_blink' | 'insufficient_frames' | undefined;
+  
+  if (landmarkBuffer.length < MIN_FRAMES_FOR_RIGIDITY) {
+    reason = 'insufficient_frames';
+  } else if (!rigidityPassed) {
+    reason = 'photo_detected';
+  } else if (!blinkPassed) {
+    reason = 'no_blink';
+  } else {
+    passed = true;
+  }
+
+  const nextContext: LivenessContext = {
+    ...context,
+    earHistory,
+    landmarkBuffer,
+    rigidityScore,
+    rigidityChecked,
+    blinkDetected: blinkPassed,
+    state: passed ? 'PASSED' : (reason === 'insufficient_frames' ? 'IDLE' : 'FAILED')
+  };
+
+  return {
+    context: nextContext,
+    result: {
+      passed,
+      rigidityScore,
+      blinkCount,
+      framesAnalyzed: landmarkBuffer.length,
+      reason
+    }
+  };
+}

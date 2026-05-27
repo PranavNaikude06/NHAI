@@ -15,5 +15,11 @@ export const Config = {
   
   // Encryption configuration
   KEYCHAIN_SERVICE: 'com.datalakeguard.embeddingkey',
+
+  // Liveness and Preprocessing Config
+  LIVENESS_MODE: 'passive',  // 'passive' for sub-1s, 'active' for interactive pose
+  ENABLE_CLAHE: true,        // Enable CLAHE for outdoor lighting robustness by default
+  PASSIVE_LIVENESS_BUFFER_SIZE: 5,
+  PASSIVE_LIVENESS_MIN_BLINKS: 1,
 };
 

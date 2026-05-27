@@ -31,3 +31,32 @@ export async function runFaceNet(
   }
   return TFLiteInference.runFaceNet(croppedFaceData, enableCLAHE, clipLimit, tileSize);
 }
+
+export interface FullPipelineResult {
+  faceDetected: boolean;
+  identity: string | null;
+  confidence: number;
+  landmarks: number[];
+  box: number[];
+}
+
+export async function runFullPipeline(
+  imageData: number[],
+  srcWidth: number,
+  srcHeight: number,
+  enableCLAHE: boolean = true,
+  clipLimit: number = 2.0,
+  tileSize: number = 8
+): Promise<FullPipelineResult> {
+  if (!TFLiteInference) {
+    return Promise.reject('TFLiteInference module is not available');
+  }
+  return TFLiteInference.runFullPipeline(
+    imageData,
+    srcWidth,
+    srcHeight,
+    enableCLAHE,
+    clipLimit,
+    tileSize
+  );
+}

@@ -9,14 +9,24 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
+import java.util.concurrent.Executors
+import java.util.concurrent.Callable
+import java.util.concurrent.Future
 
 class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
     private var blazeFaceInterpreter: Interpreter? = null
     private var faceNetInterpreter: Interpreter? = null
+    private var faceMeshInterpreter: Interpreter? = null
+    private val executor = Executors.newSingleThreadExecutor()
 
     override fun getName(): String {
         return "TFLiteInference"
+    }
+
+    override fun invalidate() {
+        super.invalidate()
+        executor.shutdown()
     }
 
     init {
@@ -34,6 +44,7 @@ class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) :
         
         blazeFaceInterpreter = Interpreter(loadModelFile("blazeface.tflite"), options)
         faceNetInterpreter = Interpreter(loadModelFile("mobilefacenet.tflite"), options)
+        faceMeshInterpreter = Interpreter(loadModelFile("facemesh.tflite"), options)
         
         Log.d("TFLiteInference", "Models loaded successfully.")
         
@@ -157,26 +168,34 @@ class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) :
         val tileWidth = width / tileGridW
         val tileHeight = height / tileGridH
         val tilePixels = tileWidth * tileHeight
+        val totalTiles = tileGridW * tileGridH
 
         // 1. Calculate Y (luminance) for the entire image
         val Y = FloatArray(width * height)
         for (i in 0 until width * height) {
-            val r = rgbData[i * 3]
-            val g = rgbData[i * 3 + 1]
-            val b = rgbData[i * 3 + 2]
-            Y[i] = 0.299f * r + 0.587f * g + 0.114f * b
+            Y[i] = 0.299f * rgbData[i * 3] + 0.587f * rgbData[i * 3 + 1] + 0.114f * rgbData[i * 3 + 2]
         }
 
+        // Flat histograms array to avoid extensive allocations
+        val histograms = IntArray(totalTiles * numBins)
+
         // 2. Compute histogram for each tile
-        val histograms = Array(tileGridH) { Array(tileGridW) { IntArray(numBins) } }
         for (ty in 0 until tileGridH) {
+            val yStart = ty * tileHeight
+            val yEnd = yStart + tileHeight
+            val tyOffset = ty * tileGridW * numBins
+            
             for (tx in 0 until tileGridW) {
-                val hist = histograms[ty][tx]
-                for (y in ty * tileHeight until (ty + 1) * tileHeight) {
-                    for (x in tx * tileWidth until (tx + 1) * tileWidth) {
-                        val idx = y * width + x
+                val xStart = tx * tileWidth
+                val xEnd = xStart + tileWidth
+                val histOffset = tyOffset + tx * numBins
+                
+                for (y in yStart until yEnd) {
+                    val rowOffset = y * width
+                    for (x in xStart until xEnd) {
+                        val idx = rowOffset + x
                         val valInt = Y[idx].toInt().coerceIn(0, 255)
-                        hist[valInt]++
+                        histograms[histOffset + valInt]++
                     }
                 }
 
@@ -184,89 +203,92 @@ class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) :
                 val limit = (clipLimit * tilePixels / numBins).toInt().coerceAtLeast(1)
                 var clipped = 0
                 for (b in 0 until numBins) {
-                    if (hist[b] > limit) {
-                        clipped += hist[b] - limit
-                        hist[b] = limit
+                    val hVal = histograms[histOffset + b]
+                    if (hVal > limit) {
+                        clipped += hVal - limit
+                        histograms[histOffset + b] = limit
                     }
                 }
 
                 val redist = clipped / numBins
                 val remainder = clipped % numBins
                 for (b in 0 until numBins) {
-                    hist[b] += redist
+                    histograms[histOffset + b] += redist
                 }
                 for (b in 0 until remainder) {
-                    hist[b]++
+                    histograms[histOffset + b]++
                 }
 
-                // Compute CDF
-                val cdf = FloatArray(numBins)
+                // Compute CDF in-place scaling to [0, 255]
                 var sum = 0
                 for (b in 0 until numBins) {
-                    sum += hist[b]
-                    cdf[b] = sum.toFloat() / tilePixels
-                }
-                // Scale mapping to [0, 255]
-                for (b in 0 until numBins) {
-                    hist[b] = (cdf[b] * 255.0f).toInt().coerceIn(0, 255)
+                    sum += histograms[histOffset + b]
+                    histograms[histOffset + b] = ((sum.toFloat() / tilePixels) * 255.0f).toInt().coerceIn(0, 255)
                 }
             }
         }
 
         // 3. Bilinear interpolation of mapped luminance values
         val outputY = FloatArray(width * height)
+        val invTileWidth = 1.0f / tileWidth
+        val invTileHeight = 1.0f / tileHeight
+
         for (y in 0 until height) {
+            val fy = (y - tileHeight / 2.0f) * invTileHeight
+            val fyFloor = if (fy >= 0.0f) fy.toInt() else fy.toInt() - 1
+            val ty0 = fyFloor.coerceIn(0, tileGridH - 1)
+            val ty1 = (ty0 + 1).coerceAtMost(tileGridH - 1)
+            val wy = fy - ty0
+
+            val ty0Offset = ty0 * tileGridW * numBins
+            val ty1Offset = ty1 * tileGridW * numBins
+            val yRowOffset = y * width
+
             for (x in 0 until width) {
-                val valInt = Y[y * width + x].toInt().coerceIn(0, 255)
+                val valInt = Y[yRowOffset + x].toInt().coerceIn(0, 255)
 
-                val fx = (x - tileWidth / 2.0f) / tileWidth
-                val fy = (y - tileHeight / 2.0f) / tileHeight
-
-                val tx0 = Math.floor(fx.toDouble()).toInt().coerceIn(0, tileGridW - 1)
-                val ty0 = Math.floor(fy.toDouble()).toInt().coerceIn(0, tileGridH - 1)
+                val fx = (x - tileWidth / 2.0f) * invTileWidth
+                val fxFloor = if (fx >= 0.0f) fx.toInt() else fx.toInt() - 1
+                val tx0 = fxFloor.coerceIn(0, tileGridW - 1)
                 val tx1 = (tx0 + 1).coerceAtMost(tileGridW - 1)
-                val ty1 = (ty0 + 1).coerceAtMost(tileGridH - 1)
-
                 val wx = fx - tx0
-                val wy = fy - ty0
 
                 val mappedVal = if (tx0 == tx1 && ty0 == ty1) {
-                    histograms[ty0][tx0][valInt].toFloat()
+                    histograms[ty0Offset + tx0 * numBins + valInt].toFloat()
                 } else if (tx0 == tx1) {
-                    val valY0 = histograms[ty0][tx0][valInt]
-                    val valY1 = histograms[ty1][tx0][valInt]
-                    (1 - wy) * valY0 + wy * valY1
+                    val valY0 = histograms[ty0Offset + tx0 * numBins + valInt]
+                    val valY1 = histograms[ty1Offset + tx0 * numBins + valInt]
+                    (1.0f - wy) * valY0 + wy * valY1
                 } else if (ty0 == ty1) {
-                    val valX0 = histograms[ty0][tx0][valInt]
-                    val valX1 = histograms[ty0][tx1][valInt]
-                    (1 - wx) * valX0 + wx * valX1
+                    val valX0 = histograms[ty0Offset + tx0 * numBins + valInt]
+                    val valX1 = histograms[ty0Offset + tx1 * numBins + valInt]
+                    (1.0f - wx) * valX0 + wx * valX1
                 } else {
-                    val val00 = histograms[ty0][tx0][valInt]
-                    val val01 = histograms[ty0][tx1][valInt]
-                    val val10 = histograms[ty1][tx0][valInt]
-                    val val11 = histograms[ty1][tx1][valInt]
+                    val val00 = histograms[ty0Offset + tx0 * numBins + valInt]
+                    val val01 = histograms[ty0Offset + tx1 * numBins + valInt]
+                    val val10 = histograms[ty1Offset + tx0 * numBins + valInt]
+                    val val11 = histograms[ty1Offset + tx1 * numBins + valInt]
 
-                    (1 - wx) * (1 - wy) * val00 +
-                            wx * (1 - wy) * val01 +
-                            (1 - wx) * wy * val10 +
+                    (1.0f - wx) * (1.0f - wy) * val00 +
+                            wx * (1.0f - wy) * val01 +
+                            (1.0f - wx) * wy * val10 +
                             wx * wy * val11
                 }
-                outputY[y * width + x] = mappedVal
+                outputY[yRowOffset + x] = mappedVal
             }
         }
 
-        // 4. Reconstruct color image preserving original ratio
-        val outRGB = FloatArray(width * height * 3)
+        // 4. Reconstruct color image preserving original ratio in-place
         for (i in 0 until width * height) {
             val oldY = Y[i]
             val newY = outputY[i]
             val ratio = if (oldY > 0.0f) newY / oldY else 0.0f
 
-            outRGB[i * 3] = (rgbData[i * 3] * ratio).coerceIn(0.0f, 255.0f)
-            outRGB[i * 3 + 1] = (rgbData[i * 3 + 1] * ratio).coerceIn(0.0f, 255.0f)
-            outRGB[i * 3 + 2] = (rgbData[i * 3 + 2] * ratio).coerceIn(0.0f, 255.0f)
+            rgbData[i * 3] = (rgbData[i * 3] * ratio).coerceIn(0.0f, 255.0f)
+            rgbData[i * 3 + 1] = (rgbData[i * 3 + 1] * ratio).coerceIn(0.0f, 255.0f)
+            rgbData[i * 3 + 2] = (rgbData[i * 3 + 2] * ratio).coerceIn(0.0f, 255.0f)
         }
-        return outRGB
+        return rgbData
     }
 
     @ReactMethod
@@ -335,6 +357,275 @@ class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) :
             promise.resolve(result)
         } catch (e: Exception) {
             promise.reject("INFERENCE_ERROR", "Error during MobileFaceNet inference: ${e.message}", e)
+        }
+    }
+
+    private fun resizeRGBNative(
+        pixels: FloatArray,
+        srcWidth: Int,
+        srcHeight: Int,
+        targetWidth: Int,
+        targetHeight: Int
+    ): FloatArray {
+        val result = FloatArray(targetWidth * targetHeight * 3)
+        val scaleX = srcWidth.toFloat() / targetWidth
+        val scaleY = srcHeight.toFloat() / targetHeight
+        for (cy in 0 until targetHeight) {
+            val srcY = Math.min(srcHeight - 1, (cy * scaleY).toInt())
+            val rowOffset = srcY * srcWidth
+            val destRowOffset = cy * targetWidth
+            for (cx in 0 until targetWidth) {
+                val srcX = Math.min(srcWidth - 1, (cx * scaleX).toInt())
+                val srcIdx = (rowOffset + srcX) * 3
+                val destIdx = (destRowOffset + cx) * 3
+
+                result[destIdx] = pixels[srcIdx]
+                result[destIdx + 1] = pixels[srcIdx + 1]
+                result[destIdx + 2] = pixels[srcIdx + 2]
+            }
+        }
+        return result
+    }
+
+    private fun cropAndResizeRGBNative(
+        pixels: FloatArray,
+        srcWidth: Int,
+        srcHeight: Int,
+        x: Float,
+        y: Float,
+        width: Float,
+        height: Float,
+        targetWidth: Int,
+        targetHeight: Int
+    ): FloatArray {
+        val isNormalized = x in 0.0f..1.0f && width in 0.0f..1.0f
+        
+        val xStart = Math.max(0, (if (isNormalized) x * srcWidth else x).toInt())
+        val yStart = Math.max(0, (if (isNormalized) y * srcHeight else y).toInt())
+        val cropW = Math.max(1, (if (isNormalized) width * srcWidth else width).toInt())
+        val cropH = Math.max(1, (if (isNormalized) height * srcHeight else height).toInt())
+
+        val result = FloatArray(targetWidth * targetHeight * 3)
+        val scaleX = cropW.toFloat() / targetWidth
+        val scaleY = cropH.toFloat() / targetHeight
+
+        for (cy in 0 until targetHeight) {
+            val srcY = Math.min(srcHeight - 1, yStart + (cy * scaleY).toInt())
+            val rowOffset = srcY * srcWidth
+            val destRowOffset = cy * targetWidth
+            
+            for (cx in 0 until targetWidth) {
+                val srcX = Math.min(srcWidth - 1, xStart + (cx * scaleX).toInt())
+                val srcIdx = (rowOffset + srcX) * 3
+                val destIdx = (destRowOffset + cx) * 3
+
+                result[destIdx] = pixels[srcIdx]
+                result[destIdx + 1] = pixels[srcIdx + 1]
+                result[destIdx + 2] = pixels[srcIdx + 2]
+            }
+        }
+        return result
+    }
+
+    @ReactMethod
+    fun runFullPipeline(
+        imageData: ReadableArray,
+        srcWidth: Int,
+        srcHeight: Int,
+        enableCLAHE: Boolean,
+        clipLimit: Double,
+        tileSize: Double,
+        promise: Promise
+    ) {
+        val blazeFace = blazeFaceInterpreter
+        val faceNet = faceNetInterpreter
+        if (blazeFace == null || faceNet == null) {
+            promise.reject("MODEL_ERROR", "Models are not fully loaded")
+            return
+        }
+
+        try {
+            val totalSize = imageData.size()
+            val rawFloats = FloatArray(totalSize)
+            for (i in 0 until totalSize) {
+                rawFloats[i] = imageData.getDouble(i).toFloat()
+            }
+
+            // 1. Run BlazeFace
+            val blazeFaceInput = if (totalSize == 128 * 128 * 3) {
+                rawFloats
+            } else {
+                resizeRGBNative(rawFloats, srcWidth, srcHeight, 128, 128)
+            }
+
+            val blazeFaceInputBuffer = ByteBuffer.allocateDirect(4 * 128 * 128 * 3).apply {
+                order(ByteOrder.nativeOrder())
+            }
+            for (i in 0 until 128 * 128 * 3) {
+                blazeFaceInputBuffer.putFloat(blazeFaceInput[i] / 255.0f)
+            }
+            blazeFaceInputBuffer.rewind()
+
+            val outputRegressions = Array(1) { Array(896) { FloatArray(16) } }
+            val outputScores = Array(1) { Array(896) { FloatArray(1) } }
+
+            val outputs = HashMap<Int, Any>()
+            outputs[0] = outputRegressions
+            outputs[1] = outputScores
+
+            blazeFace.runForMultipleInputsOutputs(arrayOf(blazeFaceInputBuffer), outputs)
+
+            var maxScore = -1.0f
+            var bestIdx = -1
+            for (i in 0 until 896) {
+                val score = outputScores[0][i][0]
+                if (score > maxScore) {
+                    maxScore = score
+                    bestIdx = i
+                }
+            }
+
+            if (bestIdx == -1 || maxScore <= 0.5f) {
+                val result = Arguments.createMap().apply {
+                    putBoolean("faceDetected", false)
+                    putNull("identity")
+                    putDouble("confidence", 0.0)
+                    putArray("landmarks", WritableNativeArray())
+                    putArray("box", WritableNativeArray())
+                }
+                promise.resolve(result)
+                return
+            }
+
+            val box = outputRegressions[0][bestIdx]
+            val boxArray = WritableNativeArray().apply {
+                pushDouble(box[0].toDouble())
+                pushDouble(box[1].toDouble())
+                pushDouble(box[2].toDouble())
+                pushDouble(box[3].toDouble())
+                pushDouble(maxScore.toDouble())
+            }
+
+            // 2. Crop FaceMesh input (192x192) and FaceNet input (112x112)
+            val croppedFaceMesh = cropAndResizeRGBNative(
+                rawFloats,
+                srcWidth,
+                srcHeight,
+                box[0],
+                box[1],
+                box[2],
+                box[3],
+                192,
+                192
+            )
+
+            val croppedFaceNet = cropAndResizeRGBNative(
+                rawFloats,
+                srcWidth,
+                srcHeight,
+                box[0],
+                box[1],
+                box[2],
+                box[3],
+                112,
+                112
+            )
+
+            // 3. Submit FaceMesh to executor (parallel)
+            val faceMeshFuture = executor.submit(Callable<FloatArray?> {
+                val interpreter = faceMeshInterpreter ?: return@Callable null
+                try {
+                    val inputBuffer = ByteBuffer.allocateDirect(4 * 192 * 192 * 3).apply {
+                        order(ByteOrder.nativeOrder())
+                    }
+                    for (v in croppedFaceMesh) {
+                        inputBuffer.putFloat(v / 255.0f)
+                    }
+                    inputBuffer.rewind()
+
+                    val outputLandmarksBuffer = ByteBuffer.allocateDirect(1404 * 4).apply {
+                        order(ByteOrder.nativeOrder())
+                    }
+                    val outputPresenceBuffer = ByteBuffer.allocateDirect(1 * 4).apply {
+                        order(ByteOrder.nativeOrder())
+                    }
+
+                    val fmOutputs = HashMap<Int, Any>()
+                    fmOutputs[0] = outputLandmarksBuffer
+                    fmOutputs[1] = outputPresenceBuffer
+
+                    interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), fmOutputs)
+
+                    outputLandmarksBuffer.rewind()
+                    outputPresenceBuffer.rewind()
+
+                    val presence = outputPresenceBuffer.getFloat()
+                    if (presence > 0.5f) {
+                        val landmarks = FloatArray(1404)
+                        outputLandmarksBuffer.asFloatBuffer().get(landmarks)
+                        landmarks
+                    } else {
+                        FloatArray(0)
+                    }
+                } catch (e: Exception) {
+                    Log.e("TFLiteInference", "Error running parallel FaceMesh: ${e.message}")
+                    null
+                }
+            })
+
+            // 4. Run CLAHE on FaceNet crop
+            val processedFaceNet = if (enableCLAHE) {
+                applyCLAHE(croppedFaceNet, 112, 112, clipLimit.toFloat(), tileSize.toInt(), tileSize.toInt())
+            } else {
+                croppedFaceNet
+            }
+
+            // 5. Run FaceNet
+            val inputBuffer = ByteBuffer.allocateDirect(2 * 4 * 112 * 112 * 3).apply {
+                order(ByteOrder.nativeOrder())
+            }
+            for (b in 0 until 2) {
+                for (i in 0 until 112 * 112 * 3) {
+                    val pixelVal = processedFaceNet[i]
+                    inputBuffer.putFloat((pixelVal - 127.5f) / 128.0f)
+                }
+            }
+            inputBuffer.rewind()
+
+            val outputBuffer = ByteBuffer.allocateDirect(2 * 192 * 4).apply {
+                order(ByteOrder.nativeOrder())
+            }
+            faceNet.run(inputBuffer, outputBuffer)
+            outputBuffer.rewind()
+
+            val embedding = FloatArray(192)
+            for (i in 0 until 192) {
+                embedding[i] = outputBuffer.getFloat()
+            }
+
+            // 6. Vector search match in native memory cache
+            val matchResult = VectorSearchEngine.findBestMatch(embedding)
+
+            // 7. Get parallel landmarks
+            val landmarksArray = WritableNativeArray()
+            val landmarks = faceMeshFuture.get()
+            if (landmarks != null) {
+                for (l in landmarks) {
+                    landmarksArray.pushDouble(l.toDouble())
+                }
+            }
+
+            // 8. Construct result WritableMap
+            val result = Arguments.createMap().apply {
+                putBoolean("faceDetected", true)
+                putString("identity", matchResult.userId)
+                putDouble("confidence", matchResult.similarity.toDouble())
+                putArray("landmarks", landmarksArray)
+                putArray("box", boxArray)
+            }
+            promise.resolve(result)
+        } catch (e: Exception) {
+            promise.reject("INFERENCE_ERROR", "Error during full pipeline inference: ${e.message}", e)
         }
     }
 }

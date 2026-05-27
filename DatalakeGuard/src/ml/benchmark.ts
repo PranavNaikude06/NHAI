@@ -1,4 +1,4 @@
-import { runBlazeFace, runFaceNet } from '../native/TFLiteBridge';
+import { runBlazeFace, runFaceNet, runFullPipeline } from '../native/TFLiteBridge';
 import { runFaceMesh } from '../native/MediaPipeBridge';
 
 const performance = (globalThis as any).performance || { now: () => Date.now() };
@@ -14,6 +14,7 @@ export interface BenchmarkReport {
   blazeFace: BenchmarkStats;
   faceMesh: BenchmarkStats;
   faceNet: BenchmarkStats;
+  fullPipeline: BenchmarkStats;
   iterations: number;
 }
 
@@ -46,6 +47,7 @@ export async function runDeviceBenchmark(iterations: number = 50): Promise<Bench
   const blazeFaceTimes: number[] = [];
   const faceMeshTimes: number[] = [];
   const faceNetTimes: number[] = [];
+  const fullPipelineTimes: number[] = [];
 
   // 1. Prepare dummy inputs
   const dummyBlazeFaceInput = new Array(128 * 128 * 3).fill(127);
@@ -57,6 +59,7 @@ export async function runDeviceBenchmark(iterations: number = 50): Promise<Bench
     await runBlazeFace(dummyBlazeFaceInput);
     await runFaceMesh(dummyFaceMeshInput);
     await runFaceNet(dummyFaceNetInput);
+    await runFullPipeline(dummyBlazeFaceInput, 128, 128, true);
   } catch (e) {
     console.warn('Benchmark warmup run failed, model loading might have errored:', e);
   }
@@ -89,12 +92,22 @@ export async function runDeviceBenchmark(iterations: number = 50): Promise<Bench
     } catch (e) {
       console.error(`FaceNet benchmark run ${i} failed`, e);
     }
+
+    // Full Unified Pipeline (BlazeFace + crop + CLAHE + FaceNet + VectorSearch + parallel FaceMesh)
+    try {
+      const start = performance.now();
+      await runFullPipeline(dummyBlazeFaceInput, 128, 128, true);
+      fullPipelineTimes.push(performance.now() - start);
+    } catch (e) {
+      console.error(`Full pipeline benchmark run ${i} failed`, e);
+    }
   }
 
   return {
     blazeFace: calculateStats(blazeFaceTimes),
     faceMesh: calculateStats(faceMeshTimes),
     faceNet: calculateStats(faceNetTimes),
+    fullPipeline: calculateStats(fullPipelineTimes),
     iterations,
   };
 }

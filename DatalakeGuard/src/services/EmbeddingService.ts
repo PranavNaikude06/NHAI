@@ -4,6 +4,7 @@ import { getDatabase } from '../db/database';
 import { EncryptionService } from './EncryptionService';
 import { InputValidator } from './InputValidator';
 import { Config } from '../constants/config';
+import { addEmbeddingToCache } from '../native/VectorSearchBridge';
 
 export interface StoredWorker {
   userId: string;
@@ -48,6 +49,11 @@ export class EmbeddingService {
          VALUES (?, ?, ?, ?, ?)`,
         [workerId, name, role, encryptedBlob, Date.now()]
       );
+      try {
+        await addEmbeddingToCache(workerId, rawEmbedding);
+      } catch (e) {
+        console.warn('[EmbeddingService] Failed to sync new embedding to native cache:', e);
+      }
     } catch (error) {
       console.error('[EmbeddingService] Enrollment failed');
       throw error;

@@ -1,8 +1,11 @@
-import { runBlazeFace, runFaceNet } from '../native/TFLiteBridge';
-import { cosineSimilarity, SIMILARITY_THRESHOLD } from './cosine';
+import { runBlazeFace, runFaceNet, runFullPipeline } from '../native/TFLiteBridge';
+import { cosineSimilarity } from './cosine';
 import { RecognitionResult, BoundingBox } from './types';
 import { loadEmbeddingsToNative, findBestMatch } from '../native/VectorSearchBridge';
 import { EmbeddingService as StoredEmbeddingService } from '../services/EmbeddingService';
+import { evaluatePassiveLiveness, LivenessContext } from './livenessStateMachine';
+import { parseLandmarks } from '../native/MediaPipeBridge';
+import { Config } from '../constants/config';
 
 // Simple crop and resize using Nearest Neighbor interpolation for flat RGB arrays
 export function cropAndResizeRGB(
@@ -13,10 +16,6 @@ export function cropAndResizeRGB(
   targetWidth: number,
   targetHeight: number
 ): number[] {
-  // Normalize bounds if they are normalized coordinates, otherwise use raw
-  // Assuming bbox has relative coordinates [0, 1] as returned by some detectors.
-  // If BlazeFace outputs normalized coordinates, we multiply by dimensions.
-  // Otherwise, if they are raw pixels, we use them directly.
   const isNormalized = bbox.x >= 0 && bbox.x <= 1.0 && bbox.width <= 1.0;
   
   const xStart = Math.max(0, Math.floor(isNormalized ? bbox.x * srcWidth : bbox.x));
@@ -44,6 +43,12 @@ export function cropAndResizeRGB(
 
 export type EmbeddingLookupService = Pick<typeof StoredEmbeddingService, 'getAllEmbeddings'>;
 
+let nativeCacheInitialized = false;
+
+export function invalidateNativeCache() {
+  nativeCacheInitialized = false;
+}
+
 export async function recognize(
   frameData: Uint8Array | number[],
   width: number,
@@ -52,77 +57,36 @@ export async function recognize(
   livenessPass: boolean = true
 ): Promise<RecognitionResult> {
   try {
-    // 1. Run BlazeFace to detect face bounding box
-    const bboxResult = await runBlazeFace(Array.from(frameData));
-    
-    // We expect runBlazeFace to return: [x, y, w, h, confidence]
-    if (bboxResult.length < 5) {
-      return { identity: null, name: null, confidence: 0, livenessPass };
-    }
-
-    const bbox: BoundingBox = {
-      x: bboxResult[0],
-      y: bboxResult[1],
-      width: bboxResult[2],
-      height: bboxResult[3],
-      confidence: bboxResult[4],
-    };
-
-    if (bbox.confidence < 0.5) {
-      return { identity: null, name: null, confidence: 0, livenessPass };
-    }
-
-    // 2. Crop + Resize to 112x112 for MobileFaceNet
-    const croppedFace = cropAndResizeRGB(frameData, width, height, bbox, 112, 112);
-
-    // 3. Generate Embedding using runFaceNet
-    const embedding = await runFaceNet(croppedFace);
-    if (embedding.length === 0) {
-      throw new Error(`Invalid embedding generated, got empty array`);
-    }
-
-    // 4. Compare with enrolled embeddings using native SIMD VectorSearch
-    const enrolledUsers = await embeddingService.getAllEmbeddings();
-    
-    let bestMatchId: string | null = null;
-    let bestMatchName: string | null = null;
-    let maxSimilarity = -1.0;
-
-    if (enrolledUsers.length > 0) {
-      try {
+    if (!nativeCacheInitialized) {
+      const enrolledUsers = await embeddingService.getAllEmbeddings();
+      if (enrolledUsers.length > 0) {
         const vectors = enrolledUsers.map(user => user.vector);
         const userIds = enrolledUsers.map(user => user.userId);
         await loadEmbeddingsToNative(vectors, userIds);
-
-        const match = await findBestMatch(embedding);
-        if (match.userId) {
-          bestMatchId = match.userId;
-          maxSimilarity = match.similarity;
-          const matchedUser = enrolledUsers.find(user => user.userId === bestMatchId);
-          if (matchedUser) {
-            bestMatchName = matchedUser.name;
-          }
-        }
-      } catch (e) {
-        console.warn('Native vector search failed, falling back to JS implementation:', e);
-        // Fallback to JS loop
-        for (const user of enrolledUsers) {
-          const similarity = cosineSimilarity(embedding, user.vector);
-          if (similarity > maxSimilarity) {
-            maxSimilarity = similarity;
-            bestMatchId = user.userId;
-            bestMatchName = user.name;
-          }
-        }
       }
+      nativeCacheInitialized = true;
     }
 
-    // 5. Match verification against threshold (0.6)
-    if (maxSimilarity >= SIMILARITY_THRESHOLD) {
+    const inputData = Array.isArray(frameData) ? frameData : Array.from(frameData);
+    const pipelineResult = await runFullPipeline(
+      inputData,
+      width,
+      height,
+      Config.ENABLE_CLAHE
+    );
+
+    if (!pipelineResult.faceDetected) {
+      return { identity: null, name: null, confidence: 0, livenessPass };
+    }
+
+    const threshold = Config.COSINE_THRESHOLD || 0.6;
+    if (pipelineResult.confidence >= threshold && pipelineResult.identity) {
+      const enrolledUsers = await embeddingService.getAllEmbeddings();
+      const matchedUser = enrolledUsers.find(user => user.userId === pipelineResult.identity);
       return {
-        identity: bestMatchId,
-        name: bestMatchName,
-        confidence: maxSimilarity,
+        identity: pipelineResult.identity,
+        name: matchedUser ? matchedUser.name : null,
+        confidence: pipelineResult.confidence,
         livenessPass,
       };
     }
@@ -130,7 +94,7 @@ export async function recognize(
     return {
       identity: null,
       name: null,
-      confidence: maxSimilarity,
+      confidence: pipelineResult.confidence,
       livenessPass,
     };
   } catch (error) {
@@ -140,6 +104,90 @@ export async function recognize(
       name: null,
       confidence: 0,
       livenessPass: false,
+    };
+  }
+}
+
+export async function recognizeWithLiveness(
+  frameData: Uint8Array | number[],
+  width: number,
+  height: number,
+  livenessContext: LivenessContext,
+  embeddingService: EmbeddingLookupService = StoredEmbeddingService
+): Promise<RecognitionResult & { livenessResult: any }> {
+  try {
+    if (!nativeCacheInitialized) {
+      const enrolledUsers = await embeddingService.getAllEmbeddings();
+      if (enrolledUsers.length > 0) {
+        const vectors = enrolledUsers.map(user => user.vector);
+        const userIds = enrolledUsers.map(user => user.userId);
+        await loadEmbeddingsToNative(vectors, userIds);
+      }
+      nativeCacheInitialized = true;
+    }
+
+    const inputData = Array.isArray(frameData) ? frameData : Array.from(frameData);
+    const pipelineResult = await runFullPipeline(
+      inputData,
+      width,
+      height,
+      Config.ENABLE_CLAHE
+    );
+
+    if (!pipelineResult.faceDetected) {
+      return {
+        identity: null,
+        name: null,
+        confidence: 0,
+        livenessPass: false,
+        livenessResult: {
+          passed: false,
+          reason: 'insufficient_frames',
+          rigidityScore: 1.0,
+          blinkCount: 0,
+          framesAnalyzed: 0
+        }
+      };
+    }
+
+    const landmarks = parseLandmarks(pipelineResult.landmarks);
+    const { result: livenessResult } = evaluatePassiveLiveness(
+      landmarks,
+      livenessContext
+    );
+
+    const threshold = Config.COSINE_THRESHOLD || 0.6;
+    let identity: string | null = null;
+    let name: string | null = null;
+
+    if (pipelineResult.confidence >= threshold && pipelineResult.identity) {
+      identity = pipelineResult.identity;
+      const enrolledUsers = await embeddingService.getAllEmbeddings();
+      const matchedUser = enrolledUsers.find(user => user.userId === identity);
+      name = matchedUser ? matchedUser.name : null;
+    }
+
+    return {
+      identity,
+      name,
+      confidence: pipelineResult.confidence,
+      livenessPass: livenessResult.passed,
+      livenessResult
+    };
+  } catch (error) {
+    console.error('Recognition with liveness error in pipeline:', error);
+    return {
+      identity: null,
+      name: null,
+      confidence: 0,
+      livenessPass: false,
+      livenessResult: {
+        passed: false,
+        reason: 'insufficient_frames',
+        rigidityScore: 1.0,
+        blinkCount: 0,
+        framesAnalyzed: 0
+      }
     };
   }
 }

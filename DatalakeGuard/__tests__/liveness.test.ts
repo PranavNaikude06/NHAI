@@ -1,7 +1,8 @@
 import {
   calculateEAR,
   createLivenessContext,
-  updateLivenessState
+  updateLivenessState,
+  evaluatePassiveLiveness
 } from '../src/ml/livenessStateMachine';
 import { BoundingBox } from '../src/ml/types';
 
@@ -162,5 +163,75 @@ describe('Liveness State Machine Tests', () => {
     // It should not fail due to rigidity, state should stay TURN_LEFT (normal flow)
     expect(context.state).not.toBe('FAILED');
     expect(step?.result.spoofType).toBe('none');
+  });
+
+  describe('evaluatePassiveLiveness Tests', () => {
+    test('should reject static frames as a photo spoof', () => {
+      let context = createLivenessContext(false, false);
+      const staticLandmarks = createMockLandmarks(0.3, 0.5);
+      
+      let step;
+      for (let i = 0; i < 5; i++) {
+        step = evaluatePassiveLiveness(staticLandmarks, context);
+        context = step.context;
+      }
+      
+      expect(step?.result.passed).toBe(false);
+      expect(step?.result.reason).toBe('photo_detected');
+      expect(context.state).toBe('FAILED');
+    });
+
+    test('should return insufficient_frames if buffer is too small', () => {
+      let context = createLivenessContext(false, false);
+      const landmarks = createMockLandmarks(0.3, 0.5);
+      
+      const step = evaluatePassiveLiveness(landmarks, context);
+      expect(step.result.passed).toBe(false);
+      expect(step.result.reason).toBe('insufficient_frames');
+    });
+
+    test('should reject if normal movement is present but no blink is detected', () => {
+      let context = createLivenessContext(false, false);
+      
+      let step;
+      for (let i = 0; i < 5; i++) {
+        const landmarks = createMockLandmarks(0.3, 0.5);
+        // Add micro-motion to key landmarks
+        const RIGIDITY_KEY_INDICES = [1, 152, 234, 454, 10, 172, 397, 127, 356, 0];
+        for (const idx of RIGIDITY_KEY_INDICES) {
+          landmarks[idx].x += (Math.sin(i + idx) * 0.01);
+          landmarks[idx].y += (Math.cos(i + idx) * 0.01);
+        }
+        step = evaluatePassiveLiveness(landmarks, context);
+        context = step.context;
+      }
+      
+      expect(step?.result.passed).toBe(false);
+      expect(step?.result.reason).toBe('no_blink');
+      expect(context.state).toBe('FAILED');
+    });
+
+    test('should pass if normal movement and at least one blink are detected', () => {
+      let context = createLivenessContext(false, false);
+      
+      let step;
+      // Feed 5 frames, simulating open-close-open EAR pattern for a blink, and micro-motions
+      const eyeHeights = [0.3, 0.15, 0.3, 0.3, 0.3];
+      for (let i = 0; i < 5; i++) {
+        const landmarks = createMockLandmarks(eyeHeights[i], 0.5);
+        // Add micro-motion to key landmarks
+        const RIGIDITY_KEY_INDICES = [1, 152, 234, 454, 10, 172, 397, 127, 356, 0];
+        for (const idx of RIGIDITY_KEY_INDICES) {
+          landmarks[idx].x += (Math.sin(i + idx) * 0.01);
+          landmarks[idx].y += (Math.cos(i + idx) * 0.01);
+        }
+        step = evaluatePassiveLiveness(landmarks, context);
+        context = step.context;
+      }
+      
+      expect(step?.result.passed).toBe(true);
+      expect(step?.result.reason).toBeUndefined();
+      expect(context.state).toBe('PASSED');
+    });
   });
 });

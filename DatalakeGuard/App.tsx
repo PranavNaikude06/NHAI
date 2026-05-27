@@ -143,6 +143,12 @@ function AppContent() {
             <Text style={[styles.tableCell, { textAlign: 'right', color: '#3c4043' }]}>{report.faceNet.p95.toFixed(0)}</Text>
           </View>
 
+          <View style={styles.tableRow}>
+            <Text style={[styles.tableCell, { flex: 2, color: '#1A73E8', fontWeight: 'bold' }]}>Unified Pipeline (E2E Scan+Match)</Text>
+            <Text style={[styles.tableCell, { textAlign: 'right', color: '#1A73E8', fontWeight: 'bold' }]}>{report.fullPipeline.average.toFixed(1)}</Text>
+            <Text style={[styles.tableCell, { textAlign: 'right', color: '#1A73E8', fontWeight: 'bold' }]}>{report.fullPipeline.p95.toFixed(0)}</Text>
+          </View>
+
           <View style={{ marginTop: 15, borderTopWidth: 1, borderColor: '#e8eaed', paddingTop: 10 }}>
             <Text style={{ fontSize: 12, color: '#80868b', fontStyle: 'italic', textAlign: 'center' }}>
               Accuracy & spoof tests require real physical face camera frames.
