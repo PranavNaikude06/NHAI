@@ -15,6 +15,7 @@ import { Text, TouchableOpacity, ActivityIndicator, ScrollView, Alert } from 're
 import { initDatabase } from './src/db/database';
 import { EncryptionService } from './src/services/EncryptionService';
 import { SyncService } from './src/services/SyncService';
+import { PayloadSigner } from './src/services/PayloadSigner';
 import { ping } from './src/native/TFLiteBridge';
 import { runDeviceBenchmark, BenchmarkReport } from './src/ml/benchmark';
 
@@ -48,6 +49,7 @@ function AppContent() {
       try {
         await initDatabase();
         await EncryptionService.initialize();
+        await PayloadSigner.initializeDeviceSecret();
         if (mounted) {
           SyncService.startConnectivityListener('device-001');
         }

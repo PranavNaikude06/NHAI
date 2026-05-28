@@ -18,6 +18,8 @@ export interface LivenessContext {
   startTimestamp: number;
   challengeSequence?: ('TURN_LEFT' | 'TURN_RIGHT')[]; // Added optional randomized sequence
   landmarkBuffer?: Landmark[][];
+  bboxHistory?: BoundingBox[];
+  laplacianHistory?: number[];
   rigidityScore?: number;
   rigidityChecked?: boolean;
   disableRigidityCheck?: boolean;
@@ -323,6 +325,55 @@ export function updateLivenessState(
   };
 }
 
+export function computeLaplacianVariance(
+  frameData: Uint8Array | number[],
+  width: number,
+  height: number,
+  bbox: BoundingBox
+): number {
+  const isNormalized = bbox.x >= 0 && bbox.x <= 1.0 && bbox.width <= 1.0;
+  const xStart = Math.max(0, Math.floor(isNormalized ? bbox.x * width : bbox.x));
+  const yStart = Math.max(0, Math.floor(isNormalized ? bbox.y * height : bbox.y));
+  const cropW = Math.max(1, Math.floor(isNormalized ? bbox.width * width : bbox.width));
+  const cropH = Math.max(1, Math.floor(isNormalized ? bbox.height * height : bbox.height));
+
+  // Downsample to 64x64 for fast texture analysis
+  const targetW = 64;
+  const targetH = 64;
+  const gray = new Uint8Array(targetW * targetH);
+
+  for (let y = 0; y < targetH; y++) {
+    for (let x = 0; x < targetW; x++) {
+      const srcX = Math.min(width - 1, xStart + Math.floor((x / targetW) * cropW));
+      const srcY = Math.min(height - 1, yStart + Math.floor((y / targetH) * cropH));
+      const srcIdx = (srcY * width + srcX) * 3;
+
+      const r = frameData[srcIdx] !== undefined ? frameData[srcIdx] : 0;
+      const g = frameData[srcIdx + 1] !== undefined ? frameData[srcIdx + 1] : 0;
+      const b = frameData[srcIdx + 2] !== undefined ? frameData[srcIdx + 2] : 0;
+      gray[y * targetW + x] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    }
+  }
+
+  // 3x3 Laplacian kernel
+  let sum = 0, sumSq = 0, n = 0;
+  for (let y = 1; y < targetH - 1; y++) {
+    for (let x = 1; x < targetW - 1; x++) {
+      const lap =
+        gray[(y - 1) * targetW + x] +
+        gray[(y + 1) * targetW + x] +
+        gray[y * targetW + (x - 1)] +
+        gray[y * targetW + (x + 1)] -
+        4 * gray[y * targetW + x];
+      sum += lap;
+      sumSq += lap * lap;
+      n++;
+    }
+  }
+  const mean = sum / n;
+  return (sumSq / n) - mean * mean;
+}
+
 export interface PassiveLivenessResult {
   passed: boolean;
   rigidityScore: number;
@@ -333,7 +384,9 @@ export interface PassiveLivenessResult {
 
 export function evaluatePassiveLiveness(
   landmarks: Landmark[],
-  context: LivenessContext
+  context: LivenessContext,
+  boundingBox?: BoundingBox,
+  currentLaplacian?: number
 ): { context: LivenessContext; result: PassiveLivenessResult } {
   if (!landmarks || landmarks.length === 0) {
     return {
@@ -348,7 +401,83 @@ export function evaluatePassiveLiveness(
     };
   }
 
-  // Update EAR history and landmark buffer
+  // Support both FaceMesh (length >= 468) and BlazeFace (length < 468)
+  if (landmarks.length < 468) {
+    const landmarkBuffer = [...(context.landmarkBuffer || []), landmarks].slice(-10);
+    const bboxHistory = [...(context.bboxHistory || []), boundingBox || { x: 0.5, y: 0.5, width: 0.5, height: 0.5, confidence: 1.0 }].slice(-10);
+    const laplacianHistory = [...(context.laplacianHistory || []), currentLaplacian !== undefined ? currentLaplacian : 80].slice(-10);
+
+    let passed = false;
+    let reason: 'photo_detected' | 'no_blink' | 'insufficient_frames' | undefined;
+    let livenessScore = 0;
+    let rigidityScore = 1.0;
+
+    const bufferSize = landmarkBuffer.length;
+    if (bufferSize < 5) {
+      reason = 'insufficient_frames';
+    } else {
+      // 1. Nose Micro-Movement (Nose tip is index 2)
+      const noseXs = landmarkBuffer.map(l => l[2]?.x ?? 0.5);
+      const noseYs = landmarkBuffer.map(l => l[2]?.y ?? 0.5);
+      const meanX = noseXs.reduce((a, b) => a + b, 0) / bufferSize;
+      const meanY = noseYs.reduce((a, b) => a + b, 0) / bufferSize;
+      const stdX = Math.sqrt(noseXs.reduce((a, b) => a + Math.pow(b - meanX, 2), 0) / bufferSize);
+      const stdY = Math.sqrt(noseYs.reduce((a, b) => a + Math.pow(b - meanY, 2), 0) / bufferSize);
+      
+      const hasMicroMovement = stdX > 0.001 || stdY > 0.001;
+      if (hasMicroMovement) livenessScore += 40;
+
+      // 2. Laplacian Variance (Texture check)
+      const avgLap = laplacianHistory.reduce((a, b) => a + b, 0) / laplacianHistory.length;
+      if (avgLap > 60) {
+        livenessScore += 40;
+      } else if (avgLap < 30) {
+        livenessScore += 0;
+      } else {
+        livenessScore += 20;
+      }
+
+      // 3. Face-Size temporal consistency (bbox area)
+      const areas = bboxHistory.map(b => b.width * b.height);
+      const meanArea = areas.reduce((a, b) => a + b, 0) / bufferSize;
+      const stdArea = Math.sqrt(areas.reduce((a, b) => a + Math.pow(b - meanArea, 2), 0) / bufferSize);
+      const hasSizeConsistency = stdArea > 0.0002;
+      if (hasSizeConsistency) livenessScore += 20;
+
+      rigidityScore = hasMicroMovement ? 0.8 : 0.1;
+
+      if (livenessScore >= 60) {
+        passed = true;
+      } else if (avgLap < 30) {
+        reason = 'photo_detected';
+      } else {
+        reason = 'no_blink';
+      }
+    }
+
+    const nextContext: LivenessContext = {
+      ...context,
+      landmarkBuffer,
+      bboxHistory,
+      laplacianHistory,
+      rigidityScore,
+      rigidityChecked: bufferSize >= 5,
+      state: passed ? 'PASSED' : (reason === 'insufficient_frames' ? 'IDLE' : 'FAILED')
+    };
+
+    return {
+      context: nextContext,
+      result: {
+        passed,
+        rigidityScore,
+        blinkCount: passed ? 1 : 0,
+        framesAnalyzed: bufferSize,
+        reason
+      }
+    };
+  }
+
+  // Legacy FaceMesh path for backwards compatibility / tests
   const ear = calculateEAR(landmarks);
   const earHistory = [...(context.earHistory || []), ear].slice(-50);
   
@@ -362,7 +491,6 @@ export function evaluatePassiveLiveness(
     rigidityChecked = true;
   }
   
-  // Monitor EAR for blink in the earHistory
   let hasDipped = false;
   let blinkCount = 0;
   for (const val of earHistory) {

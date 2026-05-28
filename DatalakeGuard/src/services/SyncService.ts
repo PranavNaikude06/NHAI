@@ -67,6 +67,7 @@ export class SyncService {
             user_id: log.userId,
             timestamp: log.timestamp,
             confidence: log.confidence,
+            liveness_score: log.livenessScore ?? null,
             liveness_pass: log.livenessPass,
             result: log.result,
             location: log.locationLat
@@ -75,12 +76,13 @@ export class SyncService {
           })),
         };
 
-        const signature = await PayloadSigner.sign(payload, Config.AWS_API_KEY);
+        const signature = await PayloadSigner.signWithDeviceSecret(payload);
 
         const response = await axios.post(Config.AWS_SYNC_ENDPOINT, payload, {
           headers: {
             'Content-Type': 'application/json',
             'x-api-key': Config.AWS_API_KEY,
+            'x-device-id': deviceId,
             'x-signature': signature,
           },
           timeout: 15000, // 15s timeout

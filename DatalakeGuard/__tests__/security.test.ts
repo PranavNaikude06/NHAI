@@ -20,7 +20,10 @@ import { InputValidator } from '../src/services/InputValidator';
 import { EmbeddingService } from '../src/services/EmbeddingService';
 import { AuthLogService } from '../src/services/AuthLogService';
 import { PayloadSigner } from '../src/services/PayloadSigner';
+import { PrototypeService } from '../src/services/PrototypeService';
+import { EncryptionService } from '../src/services/EncryptionService';
 import { getDatabase } from '../src/db/database';
+import * as Keychain from 'react-native-keychain';
 import { Config } from '../src/constants/config';
 import { handler as lambdaHandler } from '../aws/lambda/sync-handler';
 import Aes from 'react-native-aes-crypto';
@@ -230,12 +233,12 @@ describe('DatalakeGuard Security Hardening Tests', () => {
     const secretKey = 'YOUR_KEY_HERE';
     const samplePayload = {
       device_id: 'device-123',
-      sync_timestamp: 1622000000,
+      sync_timestamp: Date.now(),
       auth_logs: [
         {
           log_id: 1,
           user_id: 'EMP-001',
-          timestamp: 1622000000,
+          timestamp: Date.now(),
           confidence: 0.92,
           liveness_pass: true,
           result: 'authenticated',
@@ -302,11 +305,11 @@ describe('DatalakeGuard Security Hardening Tests', () => {
     test('should reject payload with too many log items', async () => {
       const oversizedPayload = {
         device_id: 'device-123',
-        sync_timestamp: 1622000000,
+        sync_timestamp: Date.now(),
         auth_logs: Array.from({ length: 501 }, (_, i) => ({
           log_id: i,
           user_id: 'EMP-001',
-          timestamp: 1622000000,
+          timestamp: Date.now(),
           confidence: 0.9,
           liveness_pass: true,
           result: 'authenticated',
@@ -330,7 +333,7 @@ describe('DatalakeGuard Security Hardening Tests', () => {
     test('should protect against path traversal in device_id', async () => {
       const maliciousPayload = {
         device_id: '../../malicious-path',
-        sync_timestamp: 1622000000,
+        sync_timestamp: Date.now(),
         auth_logs: [],
       };
 
@@ -371,6 +374,149 @@ describe('DatalakeGuard Security Hardening Tests', () => {
       expect(parsedBody.error).toBe('Internal server error');
       // Verify detailed message is masked
       expect(parsedBody.details).toBeUndefined();
+    });
+  });
+
+  describe('5. Hackathon 7.0 Upgrades Verification', () => {
+    const dummyEmbedding = Array.from({ length: 128 }, () => 0.1);
+
+    test('should prevent auth if locked out by rate limiting', async () => {
+      // Mock db to return 3 failures
+      dbInstance.executeSql.mockResolvedValueOnce([
+        {
+          rows: {
+            length: 3,
+            item: (idx: number) => [
+              { result: 'unknown', timestamp: Date.now() - 5000 },
+              { result: 'spoof_rejected', timestamp: Date.now() - 10000 },
+              { result: 'unknown', timestamp: Date.now() - 15000 }
+            ][idx]
+          }
+        }
+      ]);
+
+      const res = await PrototypeService.authenticateWithPrototypeBank(dummyEmbedding, 'indoor');
+      expect(res.success).toBe(false);
+      expect(res.reason).toBe('RATE_LIMITED');
+    });
+
+    test('should skip/fail authentication if database row is tampered (hash mismatch)', async () => {
+      // Setup Keychain for EncryptionService decryption
+      (Keychain.getGenericPassword as jest.Mock).mockResolvedValue({
+        password: 'mocked-key-for-test-purposes-only',
+      });
+      await EncryptionService.initialize();
+
+      const encryptedBlob = await EncryptionService.encryptEmbedding(dummyEmbedding);
+
+      // Mock DB return for getAllPrototypes
+      dbInstance.executeSql.mockResolvedValueOnce([
+        {
+          rows: {
+            length: 1,
+            item: () => ({
+              id: 1,
+              user_id: 'EMP-TAMP',
+              name: 'Tamper Boy',
+              role: 'Field Worker',
+              embedding: encryptedBlob,
+              enrolled_at: 12345678,
+              embedding_hash: 'bad-hash' // mismatched integrity hash
+            })
+          }
+        }
+      ]);
+
+      const res = await PrototypeService.getAllPrototypes();
+      expect(res.size).toBe(0); // skipped due to tamper check
+    });
+
+    test('should ingest batch CSV enrollment and assign provisional trust', async () => {
+      // Setup Keychain for EncryptionService
+      (Keychain.getGenericPassword as jest.Mock).mockResolvedValue({
+        password: 'mocked-key-for-test-purposes-only',
+      });
+      await EncryptionService.initialize();
+
+      // Empty DB for existing embeddings during duplicate checking
+      dbInstance.executeSql.mockResolvedValue([
+        {
+          rows: {
+            length: 0,
+            item: () => ({})
+          }
+        }
+      ]);
+
+      const csvContent = 
+        `userId,name,role,embedding\n` +
+        `EMP-CSV1,Batch Alice,Field Worker,"[${Array(128).fill(0.15).join(' ')}]"\n` +
+        `EMP-CSV2,Batch Bob,Supervisor,"[${Array(128).fill(-0.05).join(' ')}]"`;
+
+      const result = await EmbeddingService.ingestBatchCSV(csvContent);
+      expect(result.enrolled).toBe(2);
+      expect(result.failed).toBe(0);
+
+      // Verify provisional INSERT was called
+      expect(dbInstance.executeSql).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT OR REPLACE INTO embeddings'),
+        expect.arrayContaining(['EMP-CSV1', 'Batch Alice', 'Field Worker', 'batch_photo'])
+      );
+    });
+
+    test('should skip batch CSV row if it violates negative enrollment duplicate check', async () => {
+      // Setup Keychain for EncryptionService
+      (Keychain.getGenericPassword as jest.Mock).mockResolvedValue({
+        password: 'mocked-key-for-test-purposes-only',
+      });
+      await EncryptionService.initialize();
+
+      const encryptedBlob = await EncryptionService.encryptEmbedding(dummyEmbedding);
+
+      // Mock database to return existing worker with same face
+      dbInstance.executeSql.mockResolvedValueOnce([
+        {
+          rows: {
+            length: 1,
+            item: () => ({
+              id: 99,
+              user_id: 'EMP-EXISTING',
+              name: 'Existing Guy',
+              role: 'Field Worker',
+              embedding: encryptedBlob,
+              enrolled_at: 12345678,
+              embedding_hash: ''
+            })
+          }
+        }
+      ]);
+
+      // CSV contains exact same embedding vector -> matches existing user at 1.0 similarity (> 0.80)
+      const csvContent = 
+        `userId,name,role,embedding\n` +
+        `EMP-CSV3,Duplicate Guy,Field Worker,"[${Array(128).fill(0.1).join(' ')}]"`;
+
+      const result = await EmbeddingService.ingestBatchCSV(csvContent);
+      expect(result.enrolled).toBe(0);
+      expect(result.failed).toBe(1);
+    });
+
+    test('should adjust threshold dynamically based on Contextual Confidence Engine', () => {
+      // 1. Lenient onsite: -0.03 adjustment
+      const adjOnsite = PrototypeService.computeContextualAdjustment(19.076, 72.877, 12);
+      expect(adjOnsite).toBeCloseTo(-0.03);
+
+      // 2. Suspicious offsite: +0.08 adjustment
+      const adjOffSite = PrototypeService.computeContextualAdjustment(20.0, 75.0, 12);
+      expect(adjOffSite).toBeCloseTo(0.08);
+
+      // 3. Off-shift time adjustment: +0.06 adjustment
+      const adjOffShift = PrototypeService.computeContextualAdjustment(undefined, undefined, 23);
+      expect(adjOffShift).toBeCloseTo(0.06);
+
+      // 4. Combined location & off-shift time: 0.08 + 0.06 = 0.14
+      const adjCombined = PrototypeService.computeContextualAdjustment(20.0, 75.0, 23);
+      expect(adjCombined).toBeCloseTo(0.14);
     });
   });
 });

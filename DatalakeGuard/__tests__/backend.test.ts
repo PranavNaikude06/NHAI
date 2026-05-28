@@ -165,6 +165,7 @@ describe('Backend Services Integration Tests', () => {
           mockLog.userId,
           mockLog.timestamp,
           mockLog.confidence,
+          null,
           1, // livenessPass as integer
           mockLog.result,
           mockLog.locationLat,

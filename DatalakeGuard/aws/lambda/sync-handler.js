@@ -4,6 +4,30 @@ const AWS = require('aws-sdk');
 const crypto = require('crypto');
 const s3 = new AWS.S3();
 
+const MAX_SYNC_CLOCK_SKEW_MS = Number(process.env.MAX_SYNC_CLOCK_SKEW_MS || 5 * 60 * 1000);
+
+function resolveDeviceSecret(deviceId, apiKey) {
+  if (process.env.DEVICE_HMAC_SECRETS) {
+    try {
+      const secrets = JSON.parse(process.env.DEVICE_HMAC_SECRETS);
+      if (secrets && typeof secrets[deviceId] === 'string') {
+        return secrets[deviceId];
+      }
+    } catch (err) {
+      console.error('Invalid DEVICE_HMAC_SECRETS JSON');
+    }
+  }
+  return process.env.DEVICE_HMAC_SECRET || apiKey;
+}
+
+function signaturesMatch(a, b) {
+  if (!a || !b) return false;
+  const left = Buffer.from(a, 'hex');
+  const right = Buffer.from(b, 'hex');
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
 /**
  * Lambda handler to receive authentication logs from DatalakeGuard mobile app
  * and store them in an S3 bucket as JSON files.
@@ -31,15 +55,16 @@ exports.handler = async (event) => {
     const { device_id, sync_timestamp, auth_logs } = body;
     const headers = event.headers || {};
 
-    // Verify HMAC signature
     const apiKey = headers['x-api-key'] || headers['X-Api-Key'] || 'YOUR_KEY_HERE';
+    const headerDeviceId = headers['x-device-id'] || headers['X-Device-Id'] || device_id;
     const signature = headers['x-signature'] || headers['X-Signature'];
+    const hmacSecret = resolveDeviceSecret(headerDeviceId, apiKey);
     const expectedSignature = crypto
-      .createHmac('sha256', apiKey)
+      .createHmac('sha256', hmacSecret)
       .update(rawBody)
       .digest('hex');
 
-    if (!signature || signature !== expectedSignature) {
+    if (!signaturesMatch(signature, expectedSignature)) {
       return {
         statusCode: 401,
         headers: responseHeaders,
@@ -55,6 +80,18 @@ exports.handler = async (event) => {
         body: JSON.stringify({ 
           error: 'Invalid payload. Required fields: device_id, sync_timestamp, auth_logs (array)' 
         }),
+      };
+    }
+
+    if (
+      typeof sync_timestamp !== 'number' ||
+      !Number.isFinite(sync_timestamp) ||
+      Math.abs(Date.now() - sync_timestamp) > MAX_SYNC_CLOCK_SKEW_MS
+    ) {
+      return {
+        statusCode: 400,
+        headers: responseHeaders,
+        body: JSON.stringify({ error: 'Stale or invalid sync timestamp' }),
       };
     }
 
@@ -77,7 +114,7 @@ exports.handler = async (event) => {
         };
       }
       
-      const { log_id, user_id, timestamp, confidence, liveness_pass, result, location } = log;
+      const { log_id, user_id, timestamp, confidence, liveness_score, liveness_pass, result, location } = log;
       
       if (log_id !== undefined && log_id !== null && typeof log_id !== 'number') {
         return {
@@ -105,6 +142,17 @@ exports.handler = async (event) => {
           statusCode: 400,
           headers: responseHeaders,
           body: JSON.stringify({ error: 'Invalid confidence' }),
+        };
+      }
+      if (
+        liveness_score !== undefined &&
+        liveness_score !== null &&
+        (typeof liveness_score !== 'number' || isNaN(liveness_score) || liveness_score < 0 || liveness_score > 1)
+      ) {
+        return {
+          statusCode: 400,
+          headers: responseHeaders,
+          body: JSON.stringify({ error: 'Invalid liveness_score' }),
         };
       }
       if (typeof liveness_pass !== 'boolean') {

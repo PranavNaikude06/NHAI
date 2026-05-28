@@ -106,7 +106,6 @@ class TFLiteInference: NSObject, RCTBridgeModule {
       var result: [Double] = []
       if bestIdx != -1 && maxScore > 0.5 {
         let offset = bestIdx * 16
-        // box contains x, y, w, h in the first 4 elements
         let x = Double(regressions[offset])
         let y = Double(regressions[offset + 1])
         let w = Double(regressions[offset + 2])
@@ -117,6 +116,9 @@ class TFLiteInference: NSObject, RCTBridgeModule {
         result.append(w)
         result.append(h)
         result.append(Double(maxScore))
+        for j in 4..<16 {
+          result.append(Double(regressions[offset + j]))
+        }
       }
 
       resolve(result)

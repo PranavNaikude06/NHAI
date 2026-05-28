@@ -59,6 +59,7 @@ export class InputValidator {
     userId: string | null;
     timestamp: number;
     confidence: number;
+    livenessScore?: number;
     livenessPass: boolean;
     result: string;
     locationLat?: number;
@@ -86,6 +87,15 @@ export class InputValidator {
     }
     if (log.confidence < 0.0 || log.confidence > 1.0) {
       throw new Error('Confidence must be between 0.0 and 1.0');
+    }
+
+    if (log.livenessScore !== undefined && log.livenessScore !== null) {
+      if (typeof log.livenessScore !== 'number' || isNaN(log.livenessScore)) {
+        throw new Error('Liveness score must be a number');
+      }
+      if (log.livenessScore < 0.0 || log.livenessScore > 1.0) {
+        throw new Error('Liveness score must be between 0.0 and 1.0');
+      }
     }
 
     if (typeof log.livenessPass !== 'boolean') {

@@ -3,6 +3,7 @@
 import SQLite, { SQLiteDatabase } from 'react-native-sqlite-storage';
 import { 
   CREATE_EMBEDDINGS_TABLE, 
+  CREATE_EMBEDDINGS_INDEX,
   CREATE_AUTH_LOGS_TABLE, 
   CREATE_SYNC_META_TABLE 
 } from './schema';
@@ -23,6 +24,7 @@ export const initDatabase = async (): Promise<SQLiteDatabase> => {
 
     console.log('[Database] Initializing tables...');
     await database.executeSql(CREATE_EMBEDDINGS_TABLE);
+    await database.executeSql(CREATE_EMBEDDINGS_INDEX);
     await database.executeSql(CREATE_AUTH_LOGS_TABLE);
     await database.executeSql(CREATE_SYNC_META_TABLE);
     await runMigrations(database);

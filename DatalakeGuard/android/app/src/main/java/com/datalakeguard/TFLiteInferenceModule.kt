@@ -44,9 +44,8 @@ class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) :
         
         blazeFaceInterpreter = Interpreter(loadModelFile("blazeface.tflite"), options)
         faceNetInterpreter = Interpreter(loadModelFile("mobilefacenet.tflite"), options)
-        faceMeshInterpreter = Interpreter(loadModelFile("facemesh.tflite"), options)
         
-        Log.d("TFLiteInference", "Models loaded successfully.")
+        Log.d("TFLiteInference", "Models loaded successfully (FaceMesh dropped).")
         
         // Log tensor details for debugging
         blazeFaceInterpreter?.let { interpreter ->
@@ -137,17 +136,14 @@ class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) :
             val result = WritableNativeArray()
             if (bestIdx != -1 && maxScore > 0.5f) {
                 val box = outputRegressions[0][bestIdx]
-                // box contains: dx, dy, dw, dh, and keypoints
-                // The box coordinates are normalized or relative.
-                // Let's just output the regressions for the best box: [x, y, w, h, confidence]
-                // For simplicity, we can pass back the box values or calculate actual pixels.
-                // The PRD says it returns bounding box [x, y, w, h]
-                // Let's return: x, y, w, h, and confidence
                 result.pushDouble(box[0].toDouble())
                 result.pushDouble(box[1].toDouble())
                 result.pushDouble(box[2].toDouble())
                 result.pushDouble(box[3].toDouble())
                 result.pushDouble(maxScore.toDouble())
+                for (j in 4 until 16) {
+                    result.pushDouble(box[j].toDouble())
+                }
             }
 
             promise.resolve(result)
@@ -506,19 +502,7 @@ class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) :
                 pushDouble(maxScore.toDouble())
             }
 
-            // 2. Crop FaceMesh input (192x192) and FaceNet input (112x112)
-            val croppedFaceMesh = cropAndResizeRGBNative(
-                rawFloats,
-                srcWidth,
-                srcHeight,
-                box[0],
-                box[1],
-                box[2],
-                box[3],
-                192,
-                192
-            )
-
+            // 2. Crop FaceNet input (112x112)
             val croppedFaceNet = cropAndResizeRGBNative(
                 rawFloats,
                 srcWidth,
@@ -531,56 +515,14 @@ class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) :
                 112
             )
 
-            // 3. Submit FaceMesh to executor (parallel)
-            val faceMeshFuture = executor.submit(Callable<FloatArray?> {
-                val interpreter = faceMeshInterpreter ?: return@Callable null
-                try {
-                    val inputBuffer = ByteBuffer.allocateDirect(4 * 192 * 192 * 3).apply {
-                        order(ByteOrder.nativeOrder())
-                    }
-                    for (v in croppedFaceMesh) {
-                        inputBuffer.putFloat(v / 255.0f)
-                    }
-                    inputBuffer.rewind()
-
-                    val outputLandmarksBuffer = ByteBuffer.allocateDirect(1404 * 4).apply {
-                        order(ByteOrder.nativeOrder())
-                    }
-                    val outputPresenceBuffer = ByteBuffer.allocateDirect(1 * 4).apply {
-                        order(ByteOrder.nativeOrder())
-                    }
-
-                    val fmOutputs = HashMap<Int, Any>()
-                    fmOutputs[0] = outputLandmarksBuffer
-                    fmOutputs[1] = outputPresenceBuffer
-
-                    interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), fmOutputs)
-
-                    outputLandmarksBuffer.rewind()
-                    outputPresenceBuffer.rewind()
-
-                    val presence = outputPresenceBuffer.getFloat()
-                    if (presence > 0.5f) {
-                        val landmarks = FloatArray(1404)
-                        outputLandmarksBuffer.asFloatBuffer().get(landmarks)
-                        landmarks
-                    } else {
-                        FloatArray(0)
-                    }
-                } catch (e: Exception) {
-                    Log.e("TFLiteInference", "Error running parallel FaceMesh: ${e.message}")
-                    null
-                }
-            })
-
-            // 4. Run CLAHE on FaceNet crop
+            // 3. Run CLAHE on FaceNet crop
             val processedFaceNet = if (enableCLAHE) {
                 applyCLAHE(croppedFaceNet, 112, 112, clipLimit.toFloat(), tileSize.toInt(), tileSize.toInt())
             } else {
                 croppedFaceNet
             }
 
-            // 5. Run FaceNet
+            // 4. Run FaceNet
             val inputBuffer = ByteBuffer.allocateDirect(2 * 4 * 112 * 112 * 3).apply {
                 order(ByteOrder.nativeOrder())
             }
@@ -603,16 +545,17 @@ class TFLiteInferenceModule(private val reactContext: ReactApplicationContext) :
                 embedding[i] = outputBuffer.getFloat()
             }
 
-            // 6. Vector search match in native memory cache
+            // 5. Vector search match in native memory cache
             val matchResult = VectorSearchEngine.findBestMatch(embedding)
 
-            // 7. Get parallel landmarks
+            // 6. Get BlazeFace keypoints as landmarks to drop FaceMesh
             val landmarksArray = WritableNativeArray()
-            val landmarks = faceMeshFuture.get()
-            if (landmarks != null) {
-                for (l in landmarks) {
-                    landmarksArray.pushDouble(l.toDouble())
-                }
+            for (k in 0 until 6) {
+                val kpY = box[4 + k * 2]
+                val kpX = box[4 + k * 2 + 1]
+                landmarksArray.pushDouble(kpX.toDouble())
+                landmarksArray.pushDouble(kpY.toDouble())
+                landmarksArray.pushDouble(0.0) // z = 0
             }
 
             // 8. Construct result WritableMap
