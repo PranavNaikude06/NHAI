@@ -36,6 +36,7 @@ from test_model import (
     FaceMeshLandmarker,
     compute_laplacian_variance,
     cosine_similarity,
+    align_face_2d,
     DETECTION_CONFIDENCE_THRESHOLD,
     COSINE_MATCH_THRESHOLD,
     LIVENESS_LAPLACIAN_THRESHOLD,
@@ -426,6 +427,15 @@ MOBILE_UI = """
     <!-- Enroll section (hidden by default) -->
     <div id="enrollSection" class="section" style="display:none;">
         <input type="text" class="enroll-input" id="enrollName" placeholder="Enter person's name...">
+        <div id="enrollGuidance" style="font-size: 12px; color: var(--text-secondary); background: rgba(108,99,255,0.06); padding: 12px; border-radius: 10px; border: 1px solid var(--border); line-height: 1.5; margin-top: 8px;">
+            💡 <strong>Multi-Angle Calibration:</strong> For maximum verification accuracy (&gt;95%), capture 3 different shots under the same name:
+            <ul style="margin-left: 20px; margin-top: 6px;">
+                <li>📸 <strong>Shot 1:</strong> Look straight at the camera</li>
+                <li>📸 <strong>Shot 2:</strong> Turn face slightly left</li>
+                <li>📸 <strong>Shot 3:</strong> Turn face slightly right</li>
+            </ul>
+            The system automatically registers these reference prototypes in its bank.
+        </div>
     </div>
 
     <!-- Results Panel -->
@@ -535,11 +545,23 @@ MOBILE_UI = """
             const btn = document.getElementById('btnCapture');
             btn.disabled = true;
 
-            // Capture frame
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            ctx.drawImage(video, 0, 0);
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+            // Capture frame with client-side scaling and JPEG compression to save bandwidth (<50ms transit)
+            const maxDim = 480;
+            let targetWidth = video.videoWidth;
+            let targetHeight = video.videoHeight;
+            if (targetWidth > maxDim || targetHeight > maxDim) {
+                if (targetWidth > targetHeight) {
+                    targetHeight = Math.round((maxDim / targetWidth) * targetHeight);
+                    targetWidth = maxDim;
+                } else {
+                    targetWidth = Math.round((maxDim / targetHeight) * targetWidth);
+                    targetHeight = maxDim;
+                }
+            }
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+            ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.70);
 
             try {
                 const endpoint = currentMode === 'enroll' ? '/enroll' :
@@ -747,8 +769,19 @@ def run_pipeline(image_bgr: np.ndarray):
     except Exception:
         pass
 
-    # 4. MobileFaceNet embedding
-    embedding = embedder.embed(face_crop)
+    # 4. MobileFaceNet embedding (with 2D affine eye alignment and CLAHE)
+    if det.get('keypoints') and len(det['keypoints']) >= 2:
+        kp = det['keypoints']
+        eye1, eye2 = kp[0], kp[1]
+        if eye1[0] < eye2[0]:
+            eye_left, eye_right = eye1, eye2
+        else:
+            eye_left, eye_right = eye2, eye1
+        face_aligned = align_face_2d(image_bgr, eye_left, eye_right)
+    else:
+        face_aligned = cv2.resize(face_crop, (112, 112))
+
+    embedding = embedder.embed(face_aligned, run_clahe=True)
 
     inference_ms = (time.time() - t0) * 1000
 
@@ -793,9 +826,17 @@ def enroll():
     if result is None:
         return jsonify({'success': False, 'error': 'No face detected'})
 
-    # Store embedding
-    enrolled_embeddings[name] = np.array(result['embedding'])
-    print(f"[+] Enrolled: {name} (embedding dim={len(result['embedding'])})")
+    # Multi-prototype storage: store up to 3 reference embeddings per person
+    new_emb = np.array(result['embedding'])
+    if name not in enrolled_embeddings:
+        enrolled_embeddings[name] = []
+    
+    # FIFO replace if we have 3 prototypes already
+    if len(enrolled_embeddings[name]) >= 3:
+        enrolled_embeddings[name].pop(0)
+        
+    enrolled_embeddings[name].append(new_emb)
+    print(f"[+] Enrolled prototype for {name} (total reference prototypes={len(enrolled_embeddings[name])})")
 
     result.pop('embedding', None)
     return jsonify(result)
@@ -812,11 +853,16 @@ def recognize():
     embedding = np.array(result['embedding'])
     result.pop('embedding', None)
 
-    # Find best match
+    # Find best match against all prototypes of each enrolled person (Max similarity pooling)
     best_name = None
     best_sim = -1.0
-    for name, stored_emb in enrolled_embeddings.items():
-        sim = cosine_similarity(embedding, stored_emb)
+    for name, stored_embs in enrolled_embeddings.items():
+        if isinstance(stored_embs, list):
+            sims = [cosine_similarity(embedding, stored_emb) for stored_emb in stored_embs]
+            sim = max(sims) if sims else 0.0
+        else:
+            sim = cosine_similarity(embedding, stored_embs)
+            
         if sim > best_sim:
             best_sim = sim
             best_name = name

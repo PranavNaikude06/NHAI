@@ -57,11 +57,11 @@ def load_tflite_model(model_path: Path):
     """Load a TFLite model and allocate tensors."""
     try:
         import tflite_runtime.interpreter as tflite
-        interpreter = tflite.Interpreter(model_path=str(model_path))
+        interpreter = tflite.Interpreter(model_path=str(model_path), num_threads=4)
     except ImportError:
         # Fallback to full TensorFlow if tflite_runtime not available
         import tensorflow as tf
-        interpreter = tf.lite.Interpreter(model_path=str(model_path))
+        interpreter = tf.lite.Interpreter(model_path=str(model_path), num_threads=4)
 
     interpreter.allocate_tensors()
     return interpreter
@@ -162,11 +162,14 @@ class MobileFaceNetEmbedder:
         print(f"    Input shape:  {self.input_details[0]['shape']}")
         print(f"    Output shape: {self.output_details[0]['shape']}")
 
-    def embed(self, face_crop_bgr: np.ndarray) -> np.ndarray:
+    def embed(self, face_crop_bgr: np.ndarray, run_clahe: bool = True) -> np.ndarray:
         """
         Extract 128-dim embedding from a face crop.
         Returns normalized embedding vector.
         """
+        if run_clahe:
+            face_crop_bgr = apply_clahe(face_crop_bgr)
+
         # Preprocess: resize to 112x112, normalize to [-1, 1]
         face = cv2.resize(face_crop_bgr, (MOBILEFACENET_INPUT_SIZE, MOBILEFACENET_INPUT_SIZE))
         face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
@@ -269,6 +272,59 @@ def cosine_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
     return float(dot / (n1 * n2))
 
 
+def apply_clahe(image_bgr: np.ndarray) -> np.ndarray:
+    """
+    Apply Contrast Limited Adaptive Histogram Equalization (CLAHE)
+    to normalize lighting variation on the face crop.
+    """
+    if image_bgr.size == 0:
+        return image_bgr
+    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+    limg = cv2.merge((cl, a, b))
+    return cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+
+def align_face_2d(image_bgr: np.ndarray, eye_left: tuple, eye_right: tuple, target_size=(112, 112)) -> np.ndarray:
+    """
+    Perform 2D affine alignment on the face using eye coordinates.
+    Ensures eyes are horizontal and spaced appropriately in the target crop.
+    """
+    # Calculate angle between eyes
+    dy = eye_right[1] - eye_left[1]
+    dx = eye_right[0] - eye_left[0]
+    angle = np.degrees(np.arctan2(dy, dx))
+    
+    # Target normalized coordinates for eyes in the target crop
+    desired_left_eye = (0.35, 0.4)
+    desired_right_eye = (0.65, 0.4)
+    desired_width = target_size[0]
+    desired_height = target_size[1]
+    
+    # Distance between eyes
+    dist = np.sqrt(dx**2 + dy**2)
+    desired_dist = (desired_right_eye[0] - desired_left_eye[0]) * desired_width
+    scale = desired_dist / max(1.0, dist)
+    
+    # Center of eyes in source image
+    eyes_center = (float((eye_left[0] + eye_right[0]) / 2.0), float((eye_left[1] + eye_right[1]) / 2.0))
+    
+    # Get rotation matrix
+    M = cv2.getRotationMatrix2D(eyes_center, angle, scale)
+    
+    # Adjust translation component to center the eyes at the desired location
+    t_x = desired_width * 0.5 - eyes_center[0]
+    t_y = desired_height * desired_left_eye[1] - eyes_center[1]
+    M[0, 2] += t_x
+    M[1, 2] += t_y
+    
+    # Apply affine warp
+    aligned = cv2.warpAffine(image_bgr, M, target_size, flags=cv2.INTER_CUBIC)
+    return aligned
+
+
 def annotate_image(image: np.ndarray, detection: dict, embedding: np.ndarray,
                    laplacian: float, landmarks_ear: float = -1.0,
                    similarity: float = None, label: str = None) -> np.ndarray:
@@ -345,11 +401,25 @@ def process_single_image(image_path: str, detector: BlazeFaceDetector,
     print(f"    Confidence: {det['confidence']:.4f}")
     print(f"    Keypoints: {len(det.get('keypoints', []))}")
 
-    # Step 2: Crop face
+    # Step 2: Crop face & Alignment
     face_crop = image[y1:y2, x1:x2]
     if face_crop.size == 0:
         print("[!] Empty face crop — detection may be out of bounds.")
         return None, None
+
+    # Perform 2D face alignment if eye keypoints exist
+    if det.get('keypoints') and len(det['keypoints']) >= 2:
+        kp = det['keypoints']
+        eye1, eye2 = kp[0], kp[1]
+        if eye1[0] < eye2[0]:
+            eye_left, eye_right = eye1, eye2
+        else:
+            eye_left, eye_right = eye2, eye1
+        face_aligned = align_face_2d(image, eye_left, eye_right)
+        print("    Face Alignment: Completed 2D affine eye alignment")
+    else:
+        face_aligned = cv2.resize(face_crop, (112, 112))
+        print("    Face Alignment: Fallback to regular crop (no keypoints)")
 
     # Step 3: Liveness - Laplacian variance
     laplacian = compute_laplacian_variance(face_crop)
@@ -376,7 +446,7 @@ def process_single_image(image_path: str, detector: BlazeFaceDetector,
 
     # Step 5: MobileFaceNet embedding
     t0 = time.time()
-    embedding = embedder.embed(face_crop)
+    embedding = embedder.embed(face_aligned, run_clahe=True)
     t_embed = (time.time() - t0) * 1000
     print(f"\n[4] MobileFaceNet Embedding: ({t_embed:.1f}ms)")
     print(f"    Dimension: {len(embedding)}")
@@ -511,7 +581,20 @@ def webcam_test(detector: BlazeFaceDetector, embedder: MobileFaceNetEmbedder,
 
             if face_crop.size > 0:
                 laplacian = compute_laplacian_variance(face_crop)
-                embedding = embedder.embed(face_crop)
+                
+                # Perform 2D face alignment if eye keypoints exist
+                if det.get('keypoints') and len(det['keypoints']) >= 2:
+                    kp = det['keypoints']
+                    eye1, eye2 = kp[0], kp[1]
+                    if eye1[0] < eye2[0]:
+                        eye_left, eye_right = eye1, eye2
+                    else:
+                        eye_left, eye_right = eye2, eye1
+                    face_aligned = align_face_2d(frame, eye_left, eye_right)
+                else:
+                    face_aligned = cv2.resize(face_crop, (112, 112))
+                
+                embedding = embedder.embed(face_aligned, run_clahe=True)
 
                 # FaceMesh EAR
                 ear = -1.0
