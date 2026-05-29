@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;family=JetBrains+Mono:wght@500&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        /* Custom green for success state as per user request */
+        .bg-auth-success { background-color: #34A853; }
+        .border-auth-success { border-color: #34A853; }
+        .text-auth-success { color: #34A853; }
+        
+        @keyframes scaleIn {
+            0% { transform: scale(0.8); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .animate-scale-in { animation: scaleIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+        
+        @keyframes checkmark {
+            0% { stroke-dashoffset: 100; }
+            100% { stroke-dashoffset: 0; }
+        }
+        .draw-check {
+            stroke-dasharray: 100;
+            stroke-dashoffset: 100;
+            animation: checkmark 0.8s ease-out 0.2s forwards;
+        }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "surface-dim": "#131313",
+                        "primary-fixed-dim": "#adc7ff",
+                        "on-primary": "#002e68",
+                        "on-primary-fixed-variant": "#004493",
+                        "on-surface-variant": "#c1c6d6",
+                        "surface-container-high": "#2a2a2a",
+                        "on-secondary-container": "#003210",
+                        "on-secondary-fixed": "#002108",
+                        "inverse-primary": "#005bc0",
+                        "surface-container-highest": "#353534",
+                        "surface-container-lowest": "#0e0e0e",
+                        "error-container": "#93000a",
+                        "background": "#131313",
+                        "error": "#ffb4ab",
+                        "inverse-on-surface": "#313030",
+                        "primary-fixed": "#d8e2ff",
+                        "inverse-surface": "#e5e2e1",
+                        "on-tertiary-fixed": "#261a00",
+                        "surface-container-low": "#1c1b1b",
+                        "surface-tint": "#adc7ff",
+                        "on-tertiary": "#402d00",
+                        "on-secondary": "#003914",
+                        "on-primary-container": "#ffffff",
+                        "tertiary-fixed-dim": "#fbbc05",
+                        "on-surface": "#e5e2e1",
+                        "surface-container": "#201f1f",
+                        "surface-variant": "#353534",
+                        "tertiary-container": "#987000",
+                        "tertiary": "#fbbc05",
+                        "outline-variant": "#414754",
+                        "primary": "#adc7ff",
+                        "on-background": "#e5e2e1",
+                        "secondary-fixed-dim": "#6ddd81",
+                        "on-secondary-fixed-variant": "#005320",
+                        "on-primary-fixed": "#001a41",
+                        "on-tertiary-fixed-variant": "#5c4300",
+                        "surface-bright": "#3a3939",
+                        "on-tertiary-container": "#ffffff",
+                        "outline": "#8b909f",
+                        "primary-container": "#1a73e8",
+                        "secondary-container": "#30a550",
+                        "on-error-container": "#ffdad6",
+                        "secondary-fixed": "#89fa9b",
+                        "surface": "#131313",
+                        "secondary": "#6ddd81",
+                        "on-error": "#690005",
+                        "tertiary-fixed": "#ffdfa0"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "xs": "4px",
+                        "lg": "24px",
+                        "margin-mobile": "20px",
+                        "xl": "32px",
+                        "gutter": "16px",
+                        "sm": "12px",
+                        "md": "16px",
+                        "base": "8px"
+                    },
+                    "fontFamily": {
+                        "body-md": ["Inter"],
+                        "mono-data": ["JetBrains Mono"],
+                        "headline-lg": ["Inter"],
+                        "title-md": ["Inter"],
+                        "body-lg": ["Inter"],
+                        "headline-lg-mobile": ["Inter"],
+                        "label-md": ["Inter"],
+                        "headline-xl": ["Inter"]
+                    },
+                    "fontSize": {
+                        "body-md": ["14px", {"lineHeight": "20px", "fontWeight": "400"}],
+                        "mono-data": ["14px", {"lineHeight": "20px", "fontWeight": "500"}],
+                        "headline-lg": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.01em", "fontWeight": "700"}],
+                        "title-md": ["18px", {"lineHeight": "24px", "fontWeight": "600"}],
+                        "body-lg": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                        "headline-lg-mobile": ["20px", {"lineHeight": "28px", "fontWeight": "700"}],
+                        "label-md": ["12px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "500"}],
+                        "headline-xl": ["32px", {"lineHeight": "40px", "letterSpacing": "-0.02em", "fontWeight": "700"}]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-auth-success flex flex-col h-screen w-full overflow-hidden text-white font-body-md">
+<!-- Top AppBar (Simplified for Success State) -->
+<header class="flex justify-between items-center w-full h-16 px-margin-mobile border-b border-white/10">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-white" data-icon="shield_lock">shield_lock</span>
+<span class="font-headline-lg-mobile text-headline-lg-mobile font-bold">DatalakeGuard</span>
+</div>
+<div class="w-10 h-10 flex items-center justify-center rounded-full bg-white/10">
+<span class="material-symbols-outlined text-white" data-icon="account_circle">account_circle</span>
+</div>
+</header>
+<!-- Main Content Area -->
+<main class="flex-1 flex flex-col items-center justify-center px-margin-mobile text-center">
+<!-- Large Animated Success Icon -->
+<div class="mb-10 animate-scale-in">
+<div class="relative w-32 h-32 flex items-center justify-center rounded-full bg-white/20 border-4 border-white">
+<svg class="w-20 h-20 text-white" fill="none" stroke="currentColor" stroke-width="6" viewbox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+<path class="draw-check" d="M5 13l4 4L19 7" stroke-linecap="round" stroke-linejoin="round"></path>
+</svg>
+</div>
+</div>
+<!-- Identity Information -->
+<div class="space-y-2 mb-12">
+<h1 class="text-[36px] font-extrabold tracking-tight leading-tight uppercase">JOHN SMITH</h1>
+<p class="text-[18px] text-white/70 font-medium tracking-wide">Field Supervisor</p>
+</div>
+<!-- Security Metrics Card -->
+<div class="w-full max-w-xs p-6 bg-white/10 backdrop-blur-md rounded-xl border border-white/20 shadow-2xl space-y-4">
+<div class="flex flex-col items-center">
+<span class="text-[16px] font-semibold mb-1">Confidence: 94.2%</span>
+<div class="w-full h-1 bg-white/20 rounded-full overflow-hidden">
+<div class="h-full bg-white w-[94.2%]"></div>
+</div>
+</div>
+<div class="pt-4 border-t border-white/10 flex flex-col gap-1">
+<div class="flex justify-between items-center px-2">
+<span class="font-label-md text-label-md text-white/60">TIME</span>
+<span class="font-mono-data text-mono-data">12:34:05 PM</span>
+</div>
+<div class="flex justify-between items-center px-2">
+<span class="font-label-md text-label-md text-white/60">DATE</span>
+<span class="font-mono-data text-mono-data">May 26, 2026</span>
+</div>
+</div>
+</div>
+<!-- Decorative Element -->
+<div class="mt-8 flex gap-2">
+<span class="w-2 h-2 rounded-full bg-white/40"></span>
+<span class="w-2 h-2 rounded-full bg-white"></span>
+<span class="w-2 h-2 rounded-full bg-white/40"></span>
+</div>
+</main>
+<!-- Fixed Bottom Action Area -->
+<footer class="p-margin-mobile pb-12">
+<button class="w-full h-14 flex items-center justify-center rounded-full border-2 border-white bg-transparent text-white font-title-md hover:bg-white hover:text-auth-success transition-all duration-300 active:scale-95 shadow-lg">
+            Done
+        </button>
+</footer>
+<script>
+        // Light micro-interaction for the button
+        const doneBtn = document.querySelector('button');
+        doneBtn.addEventListener('click', () => {
+            doneBtn.innerHTML = '<span class="material-symbols-outlined animate-spin" data-icon="sync">sync</span> Processing...';
+            setTimeout(() => {
+                doneBtn.innerHTML = 'Done';
+            }, 1500);
+        });
+
+        // Add subtle atmospheric floating particles
+        function createParticle() {
+            const particle = document.createElement('div');
+            const size = Math.random() * 4 + 2;
+            particle.style.width = `${size}px`;
+            particle.style.height = `${size}px`;
+            particle.style.background = 'rgba(255, 255, 255, 0.2)';
+            particle.style.borderRadius = '50%';
+            particle.style.position = 'absolute';
+            particle.style.left = `${Math.random() * 100}%`;
+            particle.style.top = '110%';
+            particle.style.pointerEvents = 'none';
+            particle.style.zIndex = '0';
+            
+            document.body.appendChild(particle);
+            
+            const duration = Math.random() * 3000 + 3000;
+            const animation = particle.animate([
+                { transform: 'translateY(0) translateX(0)', opacity: 0 },
+                { transform: `translateY(-100vh) translateX(${(Math.random() - 0.5) * 50}px)`, opacity: 0.5 },
+                { transform: `translateY(-110vh) translateX(${(Math.random() - 0.5) * 100}px)`, opacity: 0 }
+            ], {
+                duration: duration,
+                easing: 'linear'
+            });
+            
+            animation.onfinish = () => particle.remove();
+        }
+
+        setInterval(createParticle, 400);
+    </script>
+</body></html>
