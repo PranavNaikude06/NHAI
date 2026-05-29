@@ -741,6 +741,25 @@ def decode_image(data_url: str) -> np.ndarray:
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 
+def classify_lighting(image_bgr: np.ndarray) -> str:
+    """
+    Classify the lighting condition of the face crop to handle diverse outdoor Indian environments.
+    Categorizes into LOW_LIGHT, HARSH_SUN (harsh glare/shadows), and NORMAL.
+    """
+    if image_bgr.size == 0:
+        return 'NORMAL'
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    mean_brightness = float(np.mean(gray))
+    std_brightness = float(np.std(gray))
+    
+    if mean_brightness < 45.0:
+        return 'LOW_LIGHT'
+    elif mean_brightness > 200.0 or std_brightness > 70.0:
+        return 'HARSH_SUN'
+    else:
+        return 'NORMAL'
+
+
 def run_pipeline(image_bgr: np.ndarray):
     """Run full detection + embedding + liveness pipeline."""
     t0 = time.time()
@@ -783,6 +802,9 @@ def run_pipeline(image_bgr: np.ndarray):
 
     embedding = embedder.embed(face_aligned, run_clahe=True)
 
+    # Classify facial lighting condition (harsh sunlight, low light, normal shadows)
+    lighting_cond = classify_lighting(face_aligned)
+
     inference_ms = (time.time() - t0) * 1000
 
     return {
@@ -793,6 +815,7 @@ def run_pipeline(image_bgr: np.ndarray):
         'is_live': is_live,
         'ear': ear,
         'embedding': embedding.tolist(),
+        'lighting': lighting_cond,
         'inference_ms': inference_ms,
     }
 
@@ -836,7 +859,7 @@ def enroll():
         enrolled_embeddings[name].pop(0)
         
     enrolled_embeddings[name].append(new_emb)
-    print(f"[+] Enrolled prototype for {name} (total reference prototypes={len(enrolled_embeddings[name])})")
+    print(f"[+] Enrolled prototype for {name} ({result['lighting']}) (total reference prototypes={len(enrolled_embeddings[name])})")
 
     result.pop('embedding', None)
     return jsonify(result)
@@ -869,6 +892,27 @@ def recognize():
 
     if best_name and best_sim > COSINE_MATCH_THRESHOLD:
         result['match'] = {'name': best_name, 'similarity': best_sim}
+        
+        # Self-Calibration (EMA Template Aging) for dark skin/beards/demographic updates under varying lighting
+        if best_sim > 0.80:
+            best_proto_idx = -1
+            best_proto_sim = -1.0
+            for idx, stored_emb in enumerate(enrolled_embeddings[best_name]):
+                sim = cosine_similarity(embedding, stored_emb)
+                if sim > best_proto_sim:
+                    best_proto_sim = sim
+                    best_proto_idx = idx
+            
+            if best_proto_idx != -1:
+                alpha = 0.08  # 8% learning rate for gradual adaptation
+                stored_emb = enrolled_embeddings[best_name][best_proto_idx]
+                updated_emb = (1.0 - alpha) * stored_emb + alpha * embedding
+                # Re-normalize L2 norm
+                norm = np.linalg.norm(updated_emb)
+                if norm > 0:
+                    updated_emb = updated_emb / norm
+                enrolled_embeddings[best_name][best_proto_idx] = updated_emb
+                print(f"[Self-Calibration] Passively updated template for {best_name} ({result['lighting']}) (similarity={best_sim:.4f})")
     else:
         result['match'] = None
 
