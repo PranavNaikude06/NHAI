@@ -1,13 +1,20 @@
-# Ignore sensitive files and directories
-__MACOSX/
-.DS_Store
+# Dependencies
 node_modules/
-models_tmp/
-.env
-.env.*
+__pycache__/
+*.pyc
 
-# Ignore PRD and doc files
-*prd.md
-*PRD*.md
-*prd*.md
-personc.md
+# Build outputs
+build/
+.gradle/
+
+# Test harness outputs
+test-harness/output/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
